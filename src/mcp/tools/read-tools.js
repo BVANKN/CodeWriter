@@ -44,7 +44,7 @@ export function registerReadTools(server, ctx) {
     },
     toolHandler('read_files', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { workspace, agent, session } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, agent, session } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'read_files',
         summary: args.paths.join(', ')
       });
@@ -176,7 +176,7 @@ export function registerReadTools(server, ctx) {
     },
     toolHandler('search_files', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { workspace, agent } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, agent } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'search_files',
         summary: args.query
       });

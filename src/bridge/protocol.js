@@ -34,6 +34,7 @@ export const AGENT_METHOD = {
   SEARCH: 'search',
   GIT_STATUS: 'gitStatus',
   GIT_DIFF: 'gitDiff',
+  GIT_CHECKPOINT: 'gitCheckpoint',
   RUN_COMMAND: 'runCommand',
   CANCEL_COMMAND: 'cancelCommand',
   REINDEX: 'reindex',

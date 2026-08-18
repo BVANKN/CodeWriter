@@ -1,12 +1,14 @@
 import * as z from 'zod';
+import config from '../../config.js';
 import { ok, fail, toolHandler, renderCommandOutput } from '../format.js';
-import { resolveTarget, boundedInt, WORKSPACE_ID_DESCRIPTION } from './shared.js';
+import { resolveTarget, callContext, boundedInt, WORKSPACE_ID_DESCRIPTION } from './shared.js';
 import { assertScope, WRITE_SCOPE, READ_SCOPE } from '../guards.js';
 import { REMINDERS } from '../instructions.js';
 import { AGENT_METHOD, SERVER_EVENT, AGENT_ERROR } from '../../bridge/protocol.js';
 import { badRequest } from '../../util/errors.js';
 import { uuid } from '../../util/ids.js';
 import { createLogger } from '../../logger.js';
+import { checkpointAfterChanges, describeCheckpoint } from '../../workspace/checkpoint.js';
 
 const log = createLogger('mcp-command');
 
@@ -33,7 +35,11 @@ export function registerCommandTools(server, ctx) {
         'Arguments are passed directly to the process. There is no shell, so pipes, redirects, `&&`, ' +
         'globs and variable expansion do not work; pass a real argv array. Commands the user has not ' +
         'allowed are refused, and long-running commands (dev servers, watchers) are not permitted — they ' +
-        'never exit, so they can only time out.',
+        'never exit, so they can only time out.\n\n' +
+        'LONG COMMANDS: if a command is still running when the response budget runs out, this returns a ' +
+        'runId with STATUS "still running" instead of blocking. That is NOT a failure and the command is ' +
+        'NOT cancelled — call get_command_result with the runId to collect the result. A real npm install ' +
+        'or a cold build normally needs one or two polls.',
       inputSchema: {
         workspaceId: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
         commandId: z
@@ -65,8 +71,9 @@ export function registerCommandTools(server, ctx) {
     },
     toolHandler('run_command', async (args, extra) => {
       assertScope(extra.authInfo, WRITE_SCOPE);
-      const { workspace, agent, clientName } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, agent, clientName } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'run_command',
+        requireLiveAgent: true,
         summary: args.commandId || args.argv?.join(' ')
       });
 
@@ -119,9 +126,19 @@ export function registerCommandTools(server, ctx) {
 
       ctx.activeRuns.set(runId, { workspaceId: workspace.id, commandId, startedAt: started, agentId: agent.id });
 
-      let response;
-      try {
-        response = await agent.request(
+      // Start the command without waiting for it here.
+      //
+      // A real `npm install` or a cold build takes minutes, and the MCP client
+      // gives up after 60 seconds. Blocking on the full run therefore *cannot*
+      // work for exactly the commands that matter most — the client times out,
+      // reports nothing useful, and the process keeps running orphaned.
+      //
+      // So the run is detached: we wait only as long as we safely can, and if
+      // it is still going we hand back the runId and the output so far. The
+      // model polls with get_command_result. Short commands still return in one
+      // call, so the common case is unchanged.
+      const runPromise = agent
+        .request(
           AGENT_METHOD.RUN_COMMAND,
           {
             workspaceId: workspace.id,
@@ -132,14 +149,74 @@ export function registerCommandTools(server, ctx) {
             timeoutMs: timeoutSec * 1000,
             meta: { actor: 'mcp', actorName: clientName, reason: args.reason || null, preApproved: Boolean(detected) }
           },
-          // Give the agent a grace period beyond the command's own timeout so
-          // that a killed process still reports back through the normal path.
+          // Grace beyond the command's own timeout so a killed process still
+          // reports back through the normal path.
           { timeoutMs: timeoutSec * 1000 + 30_000 }
+        )
+        .then(
+          (value) => ({ ok: true, value }),
+          (error) => ({ ok: false, error })
         );
-      } catch (err) {
-        agent
-          .request(AGENT_METHOD.CANCEL_COMMAND, { runId }, { timeoutMs: 5000 })
-          .catch(() => {});
+
+      const record = {
+        runId,
+        workspaceId: workspace.id,
+        commandId,
+        argv,
+        detected,
+        startedAt: started,
+        agentId: agent.id,
+        clientName,
+        promise: runPromise,
+        settled: null,
+        get output() {
+          return { stdout: streamedOut, stderr: streamedErr };
+        },
+        detach
+      };
+      ctx.activeRuns.set(runId, record);
+
+      // Retain the outcome so a later poll can still read it, and keep the
+      // stream attached until it finishes.
+      runPromise.then((settled) => {
+        record.settled = settled;
+        record.finishedAt = Date.now();
+        detach();
+      });
+
+      const waitMs = Math.min(timeoutSec * 1000 + 30_000, config.bridgeRpcTimeoutMs);
+      const outcome = await Promise.race([
+        runPromise,
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(null), waitMs);
+          if (typeof timer.unref === 'function') timer.unref();
+        })
+      ]);
+
+      if (outcome === null) {
+        // Still running. Report honestly rather than pretending it failed.
+        return ok(
+          [
+            `COMMAND: ${argv.join(' ')}`,
+            `STATUS:  still running after ${(waitMs / 1000).toFixed(0)}s`,
+            `RUN ID:  ${runId}`,
+            '',
+            renderCommandOutput('OUTPUT SO FAR', streamedOut + streamedErr, MAX_OUTPUT_CHARS / 2),
+            '',
+            'This command is still executing on the user\'s machine. It has NOT been cancelled.',
+            '',
+            `Call get_command_result with runId "${runId}" to wait for the rest. Long installs and`,
+            'cold builds routinely need two or three polls; that is normal, not a failure.'
+          ].join('\n'),
+          { runId, status: 'running', partial: true }
+        );
+      }
+
+      ctx.activeRuns.delete(runId);
+
+      if (!outcome.ok) {
+        const err = outcome.error;
+        agent.request(AGENT_METHOD.CANCEL_COMMAND, { runId }, { timeoutMs: 5000 }).catch(() => {});
         const partial = [
           renderCommandOutput('stdout so far', streamedOut, MAX_OUTPUT_CHARS / 2),
           renderCommandOutput('stderr so far', streamedErr, MAX_OUTPUT_CHARS / 2)
@@ -150,10 +227,9 @@ export function registerCommandTools(server, ctx) {
             'it is not something to run here — pick the project\'s one-shot build or test command instead.',
           { runId, error: err.code }
         );
-      } finally {
-        detach();
-        ctx.activeRuns.delete(runId);
       }
+
+      const response = outcome.value;
 
       const durationMs = response.durationMs ?? Date.now() - started;
       const exitCode = response.exitCode;
@@ -246,7 +322,7 @@ export function registerCommandTools(server, ctx) {
     },
     toolHandler('finish_task', async (args, extra) => {
       assertScope(extra.authInfo, WRITE_SCOPE);
-      const { workspace, session, clientName } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, session, clientName } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'finish_task',
         summary: args.summary
       });
@@ -318,7 +394,138 @@ export function registerCommandTools(server, ctx) {
         parts.push('', 'Noted as not done:', ...args.followUps.map((f) => `  - ${f}`));
       }
 
-      return ok(parts.join('\n'), { verification, filesChanged: written });
+      // Commit the work so it survives the app closing, a crash, or the next
+      // session. Best effort: a failed commit is reported, never fatal.
+      let checkpoint = null;
+      if (written.length) {
+        const agent = ctx.hub.agentsForUser(workspace.userId).find((a) => a.id === workspace.agentId);
+        if (agent) {
+          checkpoint = await checkpointAfterChanges(ctx, {
+            workspace,
+            agent,
+            summary: args.summary,
+            clientName
+          });
+          const note = describeCheckpoint(checkpoint);
+          if (note) parts.push('', note);
+        }
+      }
+
+      return ok(parts.join('\n'), { verification, filesChanged: written, checkpoint });
+    })
+  );
+
+  server.registerTool(
+    'get_command_result',
+    {
+      title: 'Get the result of a running command',
+      description:
+        'Waits for a command started by run_command that had not finished yet, and returns its exit code ' +
+        'and output.\n\n' +
+        'run_command returns early when a command is still going, because no MCP client waits more than ' +
+        'about a minute and a real `npm install` or cold build takes longer. That is not a failure — the ' +
+        'command is still running on the user\'s machine. Call this with the runId to collect the result.\n\n' +
+        'If it reports "still running" again, call it again. Several polls for a large install is normal.',
+      inputSchema: {
+        runId: z.string().describe('The runId returned by run_command.'),
+        waitSec: z
+          .number()
+          .int()
+          .optional()
+          .describe('How long to wait on this poll before reporting back (1-45, default 30).')
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    toolHandler('get_command_result', async (args, extra) => {
+      assertScope(extra.authInfo, WRITE_SCOPE);
+      const { userId } = callContext(ctx, extra);
+
+      const record = ctx.activeRuns.get(args.runId);
+      if (!record) {
+        return fail(
+          `No command with runId "${args.runId}" is tracked.\n\n` +
+            'Either it finished and its result was already returned, or the backend restarted. ' +
+            'Run the command again if you still need its output.'
+        );
+      }
+
+      const workspace = ctx.registry.get(record.workspaceId, userId);
+      const waitSec = boundedInt(args.waitSec, { name: 'waitSec', min: 1, max: 45, fallback: 30 });
+
+      const outcome =
+        record.settled ??
+        (await Promise.race([
+          record.promise,
+          new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(null), waitSec * 1000);
+            if (typeof timer.unref === 'function') timer.unref();
+          })
+        ]));
+
+      const { stdout: soFar, stderr: errSoFar } = record.output;
+
+      if (outcome === null) {
+        const elapsed = ((Date.now() - record.startedAt) / 1000).toFixed(0);
+        return ok(
+          [
+            `COMMAND: ${record.argv.join(' ')}`,
+            `STATUS:  still running after ${elapsed}s total`,
+            `RUN ID:  ${record.runId}`,
+            '',
+            renderCommandOutput('OUTPUT SO FAR', soFar + errSoFar, MAX_OUTPUT_CHARS / 2),
+            '',
+            'Still executing. Call get_command_result again with the same runId.'
+          ].join('\n'),
+          { runId: record.runId, status: 'running', partial: true }
+        );
+      }
+
+      ctx.activeRuns.delete(args.runId);
+      record.detach?.();
+
+      if (!outcome.ok) {
+        return fail(
+          `The command failed to complete: ${outcome.error.message}\n\n` +
+            renderCommandOutput('OUTPUT', soFar + errSoFar, MAX_OUTPUT_CHARS),
+          { runId: record.runId, error: outcome.error.code }
+        );
+      }
+
+      const response = outcome.value;
+      const passed = response.exitCode === 0 && !response.timedOut;
+
+      if (record.detected) {
+        workspace.verification.recordRun({
+          commandId: record.detected.id,
+          label: record.detected.label,
+          ok: passed,
+          exitCode: response.exitCode,
+          startedAt: record.startedAt,
+          finishedAt: record.finishedAt ?? Date.now(),
+          summary: passed ? 'passed' : response.timedOut ? 'timed out' : `exit ${response.exitCode}`
+        });
+        if (workspace.verification.evaluate().satisfied) workspace.verification.markClean();
+      }
+
+      const verification = workspace.verification.toJSON();
+      const header = [
+        `COMMAND: ${record.argv.join(' ')}`,
+        `EXIT:    ${response.timedOut ? 'timed out' : response.exitCode}`,
+        `TIME:    ${(((record.finishedAt ?? Date.now()) - record.startedAt) / 1000).toFixed(1)}s`,
+        `RESULT:  ${passed ? 'PASSED' : 'FAILED'}`
+      ].join('\n');
+
+      const body = [
+        renderCommandOutput('STDOUT', response.stdout || soFar, MAX_OUTPUT_CHARS),
+        renderCommandOutput('STDERR', response.stderr || errSoFar, MAX_OUTPUT_CHARS)
+      ].join('\n\n');
+
+      const trailer = passed ? summariseRemaining(verification) : `\n\n${REMINDERS.afterFailedCommand()}`;
+      const text = `${header}\n\n${body}${trailer}`;
+
+      return passed
+        ? ok(text, { runId: record.runId, exitCode: response.exitCode, passed, verification })
+        : fail(text, { runId: record.runId, exitCode: response.exitCode, passed, verification });
     })
   );
 
@@ -336,7 +543,7 @@ export function registerCommandTools(server, ctx) {
     },
     toolHandler('cancel_command', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { userId } = resolveTargetless(ctx, extra);
+      const { userId } = callContext(ctx, extra);
 
       const run = ctx.activeRuns.get(args.runId);
       if (!run) {
@@ -351,12 +558,6 @@ export function registerCommandTools(server, ctx) {
       return ok(`Cancelled "${run.commandId}".`);
     })
   );
-}
-
-/** Context for tools that do not target a specific workspace. */
-function resolveTargetless(ctx, extra) {
-  const userId = extra.authInfo?.extra?.userId;
-  return { userId };
 }
 
 /** After a passing check, say what is still outstanding rather than implying "done". */

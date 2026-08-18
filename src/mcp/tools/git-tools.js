@@ -31,7 +31,7 @@ export function registerGitTools(server, ctx) {
     },
     toolHandler('git_status', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { workspace, agent } = resolveTarget(ctx, extra, args.workspaceId, { toolName: 'git_status' });
+      const { workspace, agent } = await resolveTarget(ctx, extra, args.workspaceId, { toolName: 'git_status' });
 
       if (!workspace.git.isRepo) {
         return ok(`"${workspace.name}" is not a git repository, so there is no status to report.`);
@@ -88,7 +88,7 @@ export function registerGitTools(server, ctx) {
     },
     toolHandler('git_diff', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { workspace, agent } = resolveTarget(ctx, extra, args.workspaceId, { toolName: 'git_diff' });
+      const { workspace, agent } = await resolveTarget(ctx, extra, args.workspaceId, { toolName: 'git_diff' });
 
       if (!workspace.git.isRepo) {
         return ok(`"${workspace.name}" is not a git repository, so there is no diff to show.`);

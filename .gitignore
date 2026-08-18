@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# The JSON "database".
+#
+# These files hold account records (scrypt password hashes) and OAuth token
+# hashes once anyone signs up. They must not be in version control: a repo is
+# copied, forked, and shared far more casually than a credential store.
+#
+# The empty seed files are currently tracked. To stop tracking them without
+# deleting them from your working tree:
+#
+#     git rm --cached data/*.json
+#
+# The app recreates them on first boot, so nothing is lost.
+data/*.json
+data/*.json.tmp
+data/*.corrupt-*
+
+# macOS
+.DS_Store
+
+# Logs
+*.log

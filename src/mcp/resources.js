@@ -106,7 +106,7 @@ export function registerResources(server, ctx) {
         'path'
       );
 
-      const { workspace, agent } = resolveTarget(ctx, extra, workspaceId);
+      const { workspace, agent } = await resolveTarget(ctx, extra, workspaceId);
       const [file] = await fetchFiles(ctx, { workspace, agent, paths: [relPath] });
 
       if (file.error) {

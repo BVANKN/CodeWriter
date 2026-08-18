@@ -100,15 +100,56 @@ export const MAX_FILE_BYTES = process.env.MAX_FILE_BYTES
   ? parseInt(process.env.MAX_FILE_BYTES, 10)
   : 5 * 1024 * 1024;
 
+/**
+ * The MCP client's own per-request timeout.
+ *
+ * The SDK default is 60s (`DEFAULT_REQUEST_TIMEOUT_MSEC`). Every timeout we
+ * choose has to fit *inside* this budget: if we wait longer than the client
+ * does, the client gives up first and reports a bare "timeout" while we are
+ * still patiently waiting — so the actionable error we were about to return
+ * never reaches the model. That is the difference between "write failed
+ * because the desktop app is not responding, reconnect it" and an
+ * undiagnosable hang.
+ */
+export const CLIENT_REQUEST_BUDGET_MS = process.env.CLIENT_REQUEST_BUDGET_MS
+  ? parseInt(process.env.CLIENT_REQUEST_BUDGET_MS, 10)
+  : 60_000;
+
+/**
+ * How much of the client's budget we leave for ourselves, so our own error
+ * response is written and flushed before the client stops listening.
+ */
+export const RESPONSE_HEADROOM_MS = 12_000;
+
 /** Upper bound on how long we wait for the Electron agent to answer an RPC (in milliseconds). */
 export const BRIDGE_RPC_TIMEOUT_MS = process.env.BRIDGE_RPC_TIMEOUT_MS
   ? parseInt(process.env.BRIDGE_RPC_TIMEOUT_MS, 10)
-  : 30_000;
+  : Math.max(5_000, CLIENT_REQUEST_BUDGET_MS - RESPONSE_HEADROOM_MS);
 
-/** Upper bound for write RPCs, which may need user approval in review mode (in milliseconds). */
+/**
+ * A cheap "are you actually there?" round trip, used before any mutating
+ * operation. A WebSocket can be half-open: the proxy dropped it, no close
+ * frame arrived, `readyState` still reads OPEN, and sends vanish silently.
+ * Reads keep working because they are served from the backend's index, which
+ * is exactly the "reads fine, writes hang" signature.
+ */
+export const BRIDGE_PING_TIMEOUT_MS = process.env.BRIDGE_PING_TIMEOUT_MS
+  ? parseInt(process.env.BRIDGE_PING_TIMEOUT_MS, 10)
+  : 8_000;
+
+/**
+ * Upper bound for write RPCs.
+ *
+ * This used to be 300s to leave room for user approval in review mode. That
+ * was a mistake: no MCP client waits five minutes, so the only thing the extra
+ * time bought was a guaranteed client-side timeout with no explanation. A write
+ * that cannot complete inside the client's budget must fail *loudly and
+ * quickly* instead. Review-mode approval is handled by asking fast and failing
+ * with a message that says the user did not respond.
+ */
 export const BRIDGE_WRITE_TIMEOUT_MS = process.env.BRIDGE_WRITE_TIMEOUT_MS
   ? parseInt(process.env.BRIDGE_WRITE_TIMEOUT_MS, 10)
-  : 300_000;
+  : Math.max(5_000, CLIENT_REQUEST_BUDGET_MS - RESPONSE_HEADROOM_MS);
 
 /** Log level: debug | info | warn | error */
 export const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
@@ -179,6 +220,9 @@ export const config = {
   maxFileBytes: MAX_FILE_BYTES,
   /** Upper bound on how long we wait for the Electron agent to answer an RPC. */
   bridgeRpcTimeoutMs: BRIDGE_RPC_TIMEOUT_MS,
+  bridgePingTimeoutMs: BRIDGE_PING_TIMEOUT_MS,
+  clientRequestBudgetMs: CLIENT_REQUEST_BUDGET_MS,
+  responseHeadroomMs: RESPONSE_HEADROOM_MS,
   /** Upper bound for write RPCs, which may need user approval in review mode. */
   bridgeWriteTimeoutMs: BRIDGE_WRITE_TIMEOUT_MS,
 

@@ -10,8 +10,14 @@ const log = createLogger('bridge');
 /** Frames larger than this are refused outright rather than buffered. */
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 
-/** How often we ping; a connection that misses two in a row is dropped. */
-const HEARTBEAT_MS = 20_000;
+/**
+ * How often we ping; a connection that misses two in a row is dropped.
+ *
+ * Kept well under a minute because hosting proxies drop idle WebSockets, and a
+ * zombie connection is worse than a closed one: a closed one fails fast, a
+ * zombie swallows requests until they time out.
+ */
+const HEARTBEAT_MS = 15_000;
 
 /**
  * One connected CodeWriter desktop app.
@@ -82,6 +88,43 @@ class AgentConnection {
       this.pending.set(id, { resolve, reject, timer, method });
       this.send({ t: FRAME.REQUEST, id, method, params });
     });
+  }
+
+  /**
+   * Confirms the desktop app is genuinely reachable, not just that the socket
+   * claims to be open.
+   *
+   * A WebSocket through a proxy can be half-open: the far side is gone, no
+   * close frame ever arrived, `readyState` still reads OPEN, and everything we
+   * send disappears. Reads keep working because they come from the backend's
+   * own index, so the failure looks like "reads fine, writes hang" — which is
+   * maddening to diagnose from the client side.
+   *
+   * One cheap round trip before any mutation turns that into an immediate,
+   * accurate error. If it fails we tear the connection down so the desktop app
+   * reconnects rather than lingering as a zombie.
+   *
+   * @returns {Promise<number>} round-trip time in ms
+   */
+  async ensureAlive() {
+    const started = Date.now();
+    try {
+      await this.request('ping', {}, { timeoutMs: config.bridgePingTimeoutMs });
+      return Date.now() - started;
+    } catch (err) {
+      log.warn(`Agent ${this.id} failed a liveness check; terminating the socket`, err.message);
+      try {
+        this.socket.terminate();
+      } catch {
+        /* the close handler will clean up */
+      }
+      throw unavailable(
+        'The CodeWriter desktop app is not responding. Its connection appears to have dropped ' +
+          'without closing cleanly. It should reconnect automatically within a few seconds - ' +
+          'wait a moment and retry. If it does not, bring the app to the foreground and check the ' +
+          'Connection panel.'
+      );
+    }
   }
 
   /** Fire-and-forget event down to the desktop app. */

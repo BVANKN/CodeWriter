@@ -9,6 +9,7 @@ import { diffSummary } from '../../util/text.js';
 import { AGENT_METHOD, SERVER_EVENT, AGENT_ERROR } from '../../bridge/protocol.js';
 import { AppError } from '../../util/errors.js';
 import { createLogger } from '../../logger.js';
+import { checkpointBeforeChanges, describeCheckpoint } from '../../workspace/checkpoint.js';
 
 const log = createLogger('mcp-write');
 
@@ -67,13 +68,18 @@ export function registerWriteTools(server, ctx) {
     },
     toolHandler('write_files', async (args, extra) => {
       assertScope(extra.authInfo, WRITE_SCOPE);
-      const { workspace, agent, session, clientName } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, agent, session, clientName } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'write_files',
+        requireLiveAgent: true,
         summary: args.summary || `${args.changes.length} file(s)`
       });
 
       // Everything is validated before anything is sent to the agent.
       const validated = validateWriteBatch({ session, workspace, changes: args.changes });
+
+      // Snapshot the user's pre-existing work before the first AI change in
+      // this workspace. Must happen before the write, not after.
+      const baseline = await checkpointBeforeChanges(ctx, { workspace, agent, clientName });
 
       // Capture the "before" content so we can report a useful diff summary.
       const updates = validated.filter((v) => v.action === 'update');
@@ -200,6 +206,9 @@ export function registerWriteTools(server, ctx) {
         );
       }
 
+      const baselineNote = describeCheckpoint(baseline, { baseline: true });
+      if (baselineNote) parts.push('', baselineNote);
+
       parts.push('', '='.repeat(72), REMINDERS.afterWrite(verification));
 
       return ok(parts.join('\n'), {
@@ -238,8 +247,9 @@ export function registerWriteTools(server, ctx) {
     },
     toolHandler('delete_files', async (args, extra) => {
       assertScope(extra.authInfo, WRITE_SCOPE);
-      const { workspace, agent, session, clientName } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, agent, session, clientName } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'delete_files',
+        requireLiveAgent: true,
         summary: args.reason
       });
 
@@ -312,8 +322,9 @@ export function registerWriteTools(server, ctx) {
     },
     toolHandler('move_file', async (args, extra) => {
       assertScope(extra.authInfo, WRITE_SCOPE);
-      const { workspace, agent, session, clientName } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, agent, session, clientName } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'move_file',
+        requireLiveAgent: true,
         summary: `${args.from} -> ${args.to}`
       });
 

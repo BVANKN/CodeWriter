@@ -80,7 +80,7 @@ export function registerWorkspaceTools(server, ctx) {
     },
     toolHandler('get_workspace_overview', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { workspace } = resolveTarget(ctx, extra, args.workspaceId, { toolName: 'get_workspace_overview' });
+      const { workspace } = await resolveTarget(ctx, extra, args.workspaceId, { toolName: 'get_workspace_overview' });
 
       const v = workspace.verification.toJSON();
       const top = workspace.listDirectory('');
@@ -199,7 +199,7 @@ export function registerWorkspaceTools(server, ctx) {
     },
     toolHandler('list_files', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { workspace } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'list_files',
         summary: args.path || args.glob?.join(' ') || 'all files'
       });
@@ -269,7 +269,7 @@ export function registerWorkspaceTools(server, ctx) {
     },
     toolHandler('get_recent_changes', async (args, extra) => {
       assertScope(extra.authInfo, READ_SCOPE);
-      const { workspace, session } = resolveTarget(ctx, extra, args.workspaceId, {
+      const { workspace, session } = await resolveTarget(ctx, extra, args.workspaceId, {
         toolName: 'get_recent_changes'
       });
 

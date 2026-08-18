@@ -40,11 +40,21 @@ export function callContext(ctx, extra) {
  * Resolves the workspace a call targets and the agent that serves it, and
  * reports the call to the desktop UI so the user can see what the model is
  * doing in real time.
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.requireLiveAgent] Verify the desktop app really
+ *   answers before proceeding. Use for anything that mutates or runs commands:
+ *   those are the operations that would otherwise hang on a half-open socket.
  */
-export function resolveTarget(ctx, extra, workspaceId, { toolName, summary } = {}) {
+export async function resolveTarget(ctx, extra, workspaceId, { toolName, summary, requireLiveAgent } = {}) {
   const call = callContext(ctx, extra);
   const workspace = ctx.registry.resolve(call.userId, workspaceId);
   const agent = ctx.hub.agentForWorkspace(workspace);
+
+  if (requireLiveAgent) {
+    const rttMs = await agent.ensureAlive();
+    log.debug(`Agent liveness confirmed in ${rttMs}ms before ${toolName}`);
+  }
 
   if (toolName) {
     call.session.countCall(toolName);
