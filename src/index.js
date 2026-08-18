@@ -49,7 +49,7 @@ server.listen(config.port, config.host, () => {
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     log.error(
-      `Port ${config.port} is already in use. Set PORT in backend/.env, or stop whatever is using it.`
+      `Port ${config.port} is already in use. Change PORT in src/config.js, or stop whatever is using it.`
     );
     process.exit(1);
   }
