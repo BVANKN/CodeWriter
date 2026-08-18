@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: codewriter
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/status
+    envVars:
+      - key: NODE_VERSION
+        value: '22'
+      - key: NODE_ENV
+        value: production
+      - key: PUBLIC_URL
+        value: https://codewriter-38cb.onrender.com
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: DATA_DIR
+        value: ./data

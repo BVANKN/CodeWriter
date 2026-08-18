@@ -17,11 +17,38 @@ export const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 8721;
 export const HOST = process.env.HOST || '0.0.0.0';
 
 /**
+ * The external URL published by the hosting platform, when there is one.
+ *
+ * Render, Railway and Fly all inject this. Reading it means a deploy works
+ * without anyone remembering to set PUBLIC_URL by hand — and getting this wrong
+ * is not a cosmetic failure. PUBLIC_URL is the OAuth issuer and the token
+ * audience, so a server advertising `http://127.0.0.1:10000` sends every client
+ * to an authorization endpoint on their own machine. The server looks perfectly
+ * healthy; authorization simply never completes.
+ */
+const PLATFORM_URL =
+  process.env.RENDER_EXTERNAL_URL ||
+  (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : null) ||
+  (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null) ||
+  (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : null) ||
+  null;
+
+const HOSTED_PUBLIC_URL = 'https://codewriter-38cb.onrender.com';
+const LOCAL_PUBLIC_URL = `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}`;
+const HOSTED_RUNTIME =
+  process.env.NODE_ENV === 'production' ||
+  Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID || PLATFORM_URL);
+
+/**
  * The externally reachable base URL of this server.
- * On Render, set this to your service's public URL (e.g. https://your-app.onrender.com).
+ *
+ * Resolution order: an explicit PUBLIC_URL wins, then the platform's own value,
+ * then loopback for local development.
  */
 export const PUBLIC_URL =
-  process.env.PUBLIC_URL || `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}`;
+  process.env.PUBLIC_URL ||
+  PLATFORM_URL ||
+  (HOSTED_RUNTIME ? HOSTED_PUBLIC_URL : LOCAL_PUBLIC_URL);
 
 /** Where the JSON database lives (relative to backend root or absolute path). */
 export const DATA_DIR = process.env.DATA_DIR || './data';
