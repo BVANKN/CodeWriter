@@ -1,0 +1,21 @@
+{
+  "name": "@codewriter/backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeWriter backend: OAuth 2.1 authorization server, remote MCP server, and the bridge to the Electron workspace agent.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "ignore": "^7.0.6",
+    "ws": "^8.21.3",
+    "zod": "^4.4.3"
+  }
+}
