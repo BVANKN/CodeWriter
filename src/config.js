@@ -10,17 +10,15 @@ export const backendRoot = path.resolve(here, '..');
 // Configure your server settings directly in this file.
 // ============================================================================
 
-/** Port the HTTP server binds to. */
+/** Port the HTTP server binds to (Render sets PORT automatically). */
 export const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 8721;
 
-/** Interface to bind. Use 127.0.0.1 for local only, 0.0.0.0 for reverse proxy/tunnel. */
-export const HOST = process.env.HOST || '127.0.0.1';
+/** Interface to bind. 0.0.0.0 is required for cloud platforms like Render. */
+export const HOST = process.env.HOST || '0.0.0.0';
 
 /**
  * The externally reachable base URL of this server.
- * Local only:         http://127.0.0.1:8721
- * Behind cloudflared: https://something.trycloudflare.com
- * Behind ngrok:       https://abcd-1-2-3-4.ngrok-free.app
+ * On Render, set this to your service's public URL (e.g. https://your-app.onrender.com).
  */
 export const PUBLIC_URL =
   process.env.PUBLIC_URL || `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}`;
