@@ -48,6 +48,13 @@ class AgentConnection {
 
     /** Live command runs, so output events can be routed to their waiters. */
     this.commandStreams = new Map();
+
+    /**
+     * Capabilities the desktop app advertised. Empty until `hello` arrives, and
+     * empty forever for an app old enough not to send them — which is itself
+     * the signal that it is out of date.
+     */
+    this.capabilities = new Set();
   }
 
   get userId() {
@@ -317,6 +324,11 @@ export class AgentHub {
     switch (frame.t) {
       case FRAME.HELLO:
         agent.info = { ...agent.info, ...frame.info };
+        agent.capabilities = new Set(frame.info?.capabilities || []);
+        log.info(
+          `Agent ${agent.id} is app v${agent.info.appVersion || '?'} with ` +
+            `${agent.capabilities.size} capabilities`
+        );
         return;
 
       case FRAME.RESPONSE:

@@ -1,6 +1,13 @@
 import * as z from 'zod';
 import { ok, fail, toolHandler, renderFileList } from '../format.js';
-import { callContext, resolveTarget, boundedInt, WORKSPACE_ID_DESCRIPTION } from './shared.js';
+import {
+  callContext,
+  resolveTarget,
+  requireCapability,
+  REQUIRED_AGENT_CAPABILITIES,
+  boundedInt,
+  WORKSPACE_ID_DESCRIPTION
+} from './shared.js';
 import { assertScope, READ_SCOPE } from '../guards.js';
 import { buildGlobMatcher, normalizeRelDir } from '../../util/paths.js';
 import { formatBytes } from '../../util/text.js';
@@ -271,6 +278,7 @@ export function registerWorkspaceTools(server, ctx) {
         toolName: 'get_environment'
       });
 
+      requireCapability(agent, 'describeEnvironment');
       const env = await agent.request('describeEnvironment', {}, { timeoutMs: 20_000 });
 
       const lines = [
@@ -410,6 +418,22 @@ export function registerWorkspaceTools(server, ctx) {
         findings.roundTripMs = rtt;
         findings.healthy = true;
         lines.push(`Round trip:        ${rtt}ms  OK`);
+        lines.push(`Desktop app:       v${agent.info?.appVersion || 'unknown'}`);
+
+        const missingCaps = Object.keys(REQUIRED_AGENT_CAPABILITIES).filter(
+          (c) => !agent.capabilities?.has(c)
+        );
+        findings.missingCapabilities = missingCaps;
+        if (missingCaps.length) {
+          lines.push(
+            '',
+            'WARNING: the desktop app is OLDER than this backend.',
+            `  Missing: ${missingCaps.join(', ')}`,
+            '',
+            '  Commands and features relying on these will misbehave or be refused. Tell the user to',
+            '  rebuild and restart it:   cd frontend && npm run build && npm start'
+          );
+        }
         lines.push(
           '',
           'All hops healthy. Writes and commands should work.',

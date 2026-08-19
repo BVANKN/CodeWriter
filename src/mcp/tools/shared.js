@@ -133,6 +133,50 @@ export async function fetchFiles(ctx, { workspace, agent, paths }) {
   );
 }
 
+/**
+ * Capabilities this backend expects the desktop app to have.
+ *
+ * The backend and the app ship separately, so they drift. When the app is the
+ * older half, a tool calls a method it has never heard of and the user sees
+ * something that reads like a broken product rather than an out-of-date one.
+ */
+export const REQUIRED_AGENT_CAPABILITIES = {
+  describeEnvironment: 'reporting the OS and installed toolchains',
+  gitCheckpoint: 'automatic git safety commits',
+  installPrompt: 'asking before installing software instead of refusing',
+  boundedApproval: 'approval prompts that cannot outlive a request'
+};
+
+/**
+ * Throws a clear, actionable error when the desktop app is too old.
+ *
+ * An app that predates capability reporting advertises nothing at all, which is
+ * itself conclusive — so an empty set is treated as "definitely stale" rather
+ * than "unknown, proceed and hope".
+ *
+ * @param {object} agent
+ * @param {string} capability
+ */
+export function requireCapability(agent, capability) {
+  if (agent.capabilities?.has(capability)) return;
+
+  const what = REQUIRED_AGENT_CAPABILITIES[capability] || capability;
+  const version = agent.info?.appVersion ? ` (reporting v${agent.info.appVersion})` : '';
+
+  throw new AppError(
+    'DESKTOP_APP_OUT_OF_DATE',
+    `The CodeWriter desktop app on this machine is older than this backend and does not support ` +
+      `${what}.${version}\n\n` +
+      'This is a version mismatch, not a missing feature or a permission problem. The backend was ' +
+      'updated but the desktop app was not.\n\n' +
+      'Tell the user to rebuild and restart the desktop app:\n' +
+      '    cd frontend && npm run build && npm start\n\n' +
+      'Everything the older app does support still works, so continue with what you can and report ' +
+      'this clearly rather than concluding that CodeWriter cannot perform the action.',
+    { status: 409, details: { capability, appVersion: agent.info?.appVersion ?? null } }
+  );
+}
+
 /** Parses and bounds a positive integer argument. */
 export function boundedInt(value, { name, min, max, fallback }) {
   if (value === undefined || value === null) return fallback;
