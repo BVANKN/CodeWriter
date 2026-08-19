@@ -248,6 +248,83 @@ export function registerWorkspaceTools(server, ctx) {
   );
 
   server.registerTool(
+    'get_environment',
+    {
+      title: 'Get the machine environment',
+      description:
+        'Reports the operating system, CPU architecture, and which development tools are actually ' +
+        'installed on the user\'s machine — with versions.\n\n' +
+        'Call this BEFORE suggesting or running any install, build, or toolchain command. Everything ' +
+        'here was verified by running the tool, not assumed: it is the difference between "you are ' +
+        'probably on a Mac so try Homebrew" and knowing the OS, the chip, whether Homebrew exists and ' +
+        'where, and whether the SDK you are about to install is already present.\n\n' +
+        'It also reports the command policy, so you can tell the user exactly what to permit rather ' +
+        'than guessing why something was refused.',
+      inputSchema: {
+        workspaceId: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION)
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    toolHandler('get_environment', async (args, extra) => {
+      assertScope(extra.authInfo, READ_SCOPE);
+      const { workspace, agent } = await resolveTarget(ctx, extra, args.workspaceId, {
+        toolName: 'get_environment'
+      });
+
+      const env = await agent.request('describeEnvironment', {}, { timeoutMs: 20_000 });
+
+      const lines = [
+        'MACHINE',
+        `  OS:        ${env.os}`,
+        `  CPU:       ${env.cpu}${env.cores ? ` (${env.cores} cores)` : ''}`,
+        `  Memory:    ${env.memoryGb} GB`,
+        `  Shell:     ${env.shell || 'unknown'}`,
+        `  Home:      ${env.homedir}`
+      ];
+
+      if (env.platform === 'darwin') {
+        lines.push(
+          `  Homebrew:  ${env.homebrewPrefix ? `installed at ${env.homebrewPrefix}` : 'NOT installed'}`
+        );
+      }
+
+      lines.push('', 'INSTALLED TOOLS');
+      for (const tool of env.installed) {
+        lines.push(`  ${tool.id.padEnd(10)} ${(tool.version || 'present').padEnd(12)} ${tool.role}`);
+      }
+
+      if (env.missing?.length) {
+        lines.push('', 'NOT INSTALLED', `  ${env.missing.join(', ')}`);
+      }
+
+      const policy = env.commandPolicy || {};
+      lines.push(
+        '',
+        'COMMAND POLICY',
+        `  Mode: ${policy.mode || 'unknown'}`,
+        policy.mode === 'allowlist'
+          ? '  Only programs on the allowed list run. Anything else is refused, and the user can add it\n' +
+            '  under the Commands panel or switch the mode to be asked per command.'
+          : policy.mode === 'prompt'
+            ? '  Programs not on the list prompt the user for one-off approval.'
+            : '  Any program may run.',
+        '',
+        '  Installing or removing software ALWAYS asks the user first, whatever the mode — that changes',
+        '  the machine rather than the project. Expect a prompt, and expect it to be declined if the',
+        '  user is away from the keyboard.'
+      );
+
+      lines.push(
+        '',
+        'Use this before proposing installs. If a tool above is already present at a usable version,',
+        'do not reinstall it.'
+      );
+
+      return ok(lines.join('\n'), env);
+    })
+  );
+
+  server.registerTool(
     'diagnose_connection',
     {
       title: 'Diagnose the connection',

@@ -38,6 +38,7 @@ export const AGENT_METHOD = {
   RUN_COMMAND: 'runCommand',
   CANCEL_COMMAND: 'cancelCommand',
   REINDEX: 'reindex',
+  DESCRIBE_ENVIRONMENT: 'describeEnvironment',
   PING: 'ping'
 };
 

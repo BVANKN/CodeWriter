@@ -27,6 +27,59 @@ const DEFAULT_TIMEOUT_SEC = 240;
  */
 const FIRST_WAIT_MS = 25_000;
 
+/** How often we report progress while a command runs. */
+const PROGRESS_INTERVAL_MS = 2000;
+
+/**
+ * Streams progress notifications to the MCP client while a command runs.
+ *
+ * Two things this buys. The obvious one is that the user watching their client
+ * sees a long install moving rather than a frozen tool call. The less obvious
+ * one matters more: clients that honour `resetTimeoutOnProgress` extend their
+ * request budget on each notification, so a genuinely slow `brew install` can
+ * complete in a single call instead of being abandoned at sixty seconds.
+ *
+ * Notifications are best effort. A client that does not support progress, or a
+ * `progressToken` that was never supplied, must not turn into a failed command.
+ *
+ * @returns {() => void} stop function
+ */
+function streamProgress(extra, { label, getOutput }) {
+  const token = extra?._meta?.progressToken;
+  if (token === undefined || typeof extra?.sendNotification !== 'function') return () => {};
+
+  const started = Date.now();
+  let lastLine = '';
+
+  const tick = async () => {
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    const output = getOutput() || '';
+    // The last non-empty line is almost always the most informative thing a
+    // build tool has said, and it is what a human would read.
+    const line = output.trimEnd().split('\n').filter(Boolean).pop() || '';
+    if (line) lastLine = line.slice(0, 160);
+
+    try {
+      await extra.sendNotification({
+        method: 'notifications/progress',
+        params: {
+          progressToken: token,
+          progress: elapsed,
+          message: `${label} — ${elapsed}s${lastLine ? `: ${lastLine}` : ''}`
+        }
+      });
+    } catch {
+      // A closed stream or an unsupported notification is not a command failure.
+    }
+  };
+
+  const timer = setInterval(tick, PROGRESS_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  void tick();
+
+  return () => clearInterval(timer);
+}
+
 export function registerCommandTools(server, ctx) {
   server.registerTool(
     'run_command',
@@ -197,6 +250,11 @@ export function registerCommandTools(server, ctx) {
       // latency or a cold instance, and the only thing the extra seconds buy
       // is occasionally avoiding one cheap poll. Returning early is not a
       // failure here — get_command_result picks the run straight back up.
+      const stopProgress = streamProgress(extra, {
+        label: argv.join(' '),
+        getOutput: () => streamedOut + streamedErr
+      });
+
       const waitMs = Math.min(timeoutSec * 1000 + 30_000, FIRST_WAIT_MS);
       const outcome = await Promise.race([
         runPromise,
@@ -205,6 +263,8 @@ export function registerCommandTools(server, ctx) {
           if (typeof timer.unref === 'function') timer.unref();
         })
       ]);
+
+      stopProgress();
 
       if (outcome === null) {
         // Still running. Report honestly rather than pretending it failed.
@@ -247,6 +307,22 @@ export function registerCommandTools(server, ctx) {
       const durationMs = response.durationMs ?? Date.now() - started;
       const exitCode = response.exitCode;
       const passed = exitCode === 0 && !response.timedOut;
+
+      // A missing program is the most informative failure there is, and
+      // rendering it as "EXIT: null" throws that away. Say what is missing and
+      // how to establish that, so the model asks for an install instead of
+      // retrying the same command.
+      if (response.error === 'PROGRAM_NOT_FOUND') {
+        return fail(
+          `"${argv[0]}" is not installed on this machine, or is not on PATH.\n\n` +
+            `${response.message || ''}\n\n` +
+            'Call get_environment to see exactly what IS installed, the OS and CPU, and which package ' +
+            'manager is available, before proposing an install. Do not guess the platform.\n\n' +
+            'Installing is permitted but always asks the user first, so tell them what you are about to ' +
+            'install and why, then run it.',
+          { error: response.error, program: argv[0] }
+        );
+      }
 
       if (response.error === AGENT_ERROR.COMMAND_NOT_ALLOWED) {
         return fail(
@@ -465,6 +541,11 @@ export function registerCommandTools(server, ctx) {
       const workspace = ctx.registry.get(record.workspaceId, userId);
       const waitSec = boundedInt(args.waitSec, { name: 'waitSec', min: 1, max: 45, fallback: 30 });
 
+      const stopPolling = streamProgress(extra, {
+        label: record.argv.join(' '),
+        getOutput: () => record.output.stdout + record.output.stderr
+      });
+
       const outcome =
         record.settled ??
         (await Promise.race([
@@ -475,6 +556,7 @@ export function registerCommandTools(server, ctx) {
           })
         ]));
 
+      stopPolling();
       const { stdout: soFar, stderr: errSoFar } = record.output;
 
       if (outcome === null) {
