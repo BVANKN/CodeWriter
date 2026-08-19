@@ -19,6 +19,14 @@ const MAX_OUTPUT_CHARS = 24_000;
 const MAX_TIMEOUT_SEC = 900;
 const DEFAULT_TIMEOUT_SEC = 240;
 
+/**
+ * How long `run_command` waits before handing back a runId to poll.
+ *
+ * Sized so a short command still answers in one call while leaving generous
+ * room inside the client's 60s budget for network latency and a cold backend.
+ */
+const FIRST_WAIT_MS = 25_000;
+
 export function registerCommandTools(server, ctx) {
   server.registerTool(
     'run_command',
@@ -184,7 +192,12 @@ export function registerCommandTools(server, ctx) {
         detach();
       });
 
-      const waitMs = Math.min(timeoutSec * 1000 + 30_000, config.bridgeRpcTimeoutMs);
+      // Deliberately well short of the client's budget rather than right up
+      // against it. Waiting 48s of a 60s allowance leaves no room for network
+      // latency or a cold instance, and the only thing the extra seconds buy
+      // is occasionally avoiding one cheap poll. Returning early is not a
+      // failure here — get_command_result picks the run straight back up.
+      const waitMs = Math.min(timeoutSec * 1000 + 30_000, FIRST_WAIT_MS);
       const outcome = await Promise.race([
         runPromise,
         new Promise((resolve) => {

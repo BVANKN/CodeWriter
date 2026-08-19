@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { ok, toolHandler, renderFileList } from '../format.js';
+import { ok, fail, toolHandler, renderFileList } from '../format.js';
 import { callContext, resolveTarget, boundedInt, WORKSPACE_ID_DESCRIPTION } from './shared.js';
 import { assertScope, READ_SCOPE } from '../guards.js';
 import { buildGlobMatcher, normalizeRelDir } from '../../util/paths.js';
@@ -244,6 +244,119 @@ export function registerWorkspaceTools(server, ctx) {
         returned: page.length,
         files: page.map((f) => ({ path: f.path, size: f.size, revision: f.revision, binary: f.binary, dirty: f.dirty }))
       });
+    })
+  );
+
+  server.registerTool(
+    'diagnose_connection',
+    {
+      title: 'Diagnose the connection',
+      description:
+        'Checks every hop between you and the user\'s machine, and reports which one is broken.\n\n' +
+        'Run this the moment a write or a command fails in a way you did not expect — especially if it ' +
+        'timed out. Read-only tools are answered from the backend\'s index and keep working even when ' +
+        'the link to the desktop app is dead, so "reading works" is NOT evidence that writing will.\n\n' +
+        'This performs a real round trip to the user\'s machine, so it distinguishes a genuinely live ' +
+        'connection from one that only looks live.',
+      inputSchema: {
+        workspaceId: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION)
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    toolHandler('diagnose_connection', async (args, extra) => {
+      assertScope(extra.authInfo, READ_SCOPE);
+      const { userId, session, clientName } = callContext(ctx, extra);
+      session.countCall('diagnose_connection');
+
+      const lines = ['CONNECTION DIAGNOSTIC', ''];
+      const findings = {};
+
+      lines.push(`MCP client:        ${clientName} (session ${session.key.slice(0, 12)})`);
+      lines.push(`Backend uptime:    ${Math.floor(process.uptime())}s`);
+      findings.backendUptimeSec = Math.floor(process.uptime());
+
+      // Hop 1: is a desktop app connected for this user at all?
+      const agents = ctx.hub.agentsForUser(userId);
+      findings.desktopAppsConnected = agents.length;
+      lines.push(`Desktop apps:      ${agents.length} connected`);
+
+      if (!agents.length) {
+        lines.push(
+          '',
+          'PROBLEM: no CodeWriter desktop app is connected for this account.',
+          '',
+          'Nothing can be read from or written to the user\'s disk until it reconnects.',
+          'Ask the user to open CodeWriter and check the Connection panel. If the backend was',
+          'restarted (free hosting sleeps when idle), the app reconnects on its own within a',
+          'few seconds.'
+        );
+        return fail(lines.join('\n'), findings);
+      }
+
+      // Hop 2: workspaces.
+      const workspaces = ctx.registry.listForUser(userId);
+      findings.workspaces = workspaces.length;
+      lines.push(`Open workspaces:   ${workspaces.length}`);
+
+      if (!workspaces.length) {
+        lines.push('', 'PROBLEM: no workspace is open. Ask the user to open a folder in CodeWriter.');
+        return fail(lines.join('\n'), findings);
+      }
+
+      // Hop 3: a real round trip for the target workspace.
+      let workspace;
+      try {
+        workspace = ctx.registry.resolve(userId, args.workspaceId);
+      } catch (err) {
+        lines.push('', `PROBLEM resolving the workspace: ${err.message}`);
+        return fail(lines.join('\n'), findings);
+      }
+
+      lines.push(`Target workspace:  ${workspace.name} (${workspace.id})`);
+      lines.push(`Indexed files:     ${workspace.fileCount}`);
+
+      const agent = ctx.hub.agents.get(workspace.agentId);
+      if (!agent) {
+        lines.push(
+          '',
+          'PROBLEM: the workspace is registered but the desktop app that served it has gone.',
+          'Reads may still appear to work because they come from the backend index, but every',
+          'write and command will fail. Ask the user to reopen the folder in CodeWriter.'
+        );
+        return fail(lines.join('\n'), findings);
+      }
+
+      const started = Date.now();
+      try {
+        await agent.ensureAlive();
+        const rtt = Date.now() - started;
+        findings.roundTripMs = rtt;
+        findings.healthy = true;
+        lines.push(`Round trip:        ${rtt}ms  OK`);
+        lines.push(
+          '',
+          'All hops healthy. Writes and commands should work.',
+          '',
+          'If a write still fails, the cause is at the far end rather than in the connection:',
+          '  - CodeWriter may be set to "ask me before each change", and the prompt is waiting',
+          '    in the app unanswered. The error text will say so.',
+          '  - The program you tried to run may not be on the allowed list.',
+          'Both report a specific reason; read it rather than retrying the same call.'
+        );
+        return ok(lines.join('\n'), findings);
+      } catch (err) {
+        findings.healthy = false;
+        findings.error = err.code;
+        lines.push(
+          `Round trip:        FAILED after ${Date.now() - started}ms`,
+          '',
+          `PROBLEM: ${err.message}`,
+          '',
+          'The connection looked open but the desktop app did not answer. It has been dropped so',
+          'the app reconnects. Wait a few seconds and retry.'
+        );
+        return fail(lines.join('\n'), findings);
+      }
     })
   );
 
