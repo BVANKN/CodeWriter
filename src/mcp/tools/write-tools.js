@@ -220,6 +220,142 @@ export function registerWriteTools(server, ctx) {
   );
 
   server.registerTool(
+    'edit_file',
+    {
+      title: 'Edit part of a file',
+      description:
+        'Changes specific parts of a file without sending the whole thing.\n\n' +
+        'PREFER THIS over write_files for edits to existing files. You do not need to read the file ' +
+        'first, you do not need a baseRevision, and you do not need to reproduce a single byte you are ' +
+        'not changing. For a large file that is the difference between a small request and retyping ' +
+        'the entire component.\n\n' +
+        'Each edit quotes the exact text it replaces, and that text must appear EXACTLY ONCE. That is ' +
+        'what keeps it safe: you cannot clobber what you did not name, you cannot silently hit the ' +
+        'wrong occurrence, and if someone changed the file underneath you the anchor is gone and the ' +
+        'edit fails loudly instead of overwriting their work.\n\n' +
+        '  * Anchor not found -> the file changed, or your whitespace/indentation differs. Read the ' +
+        'file and retry with the real text.\n' +
+        '  * Anchor ambiguous -> include more surrounding context to make it unique, or set replaceAll.\n\n' +
+        'Include enough context in `find` to be unambiguous — usually a line or two around the change. ' +
+        'Edits apply in order, so a later edit sees the result of an earlier one.\n\n' +
+        'Use write_files instead when creating a new file, or when rewriting so much that quoting the ' +
+        'old text is pointless.',
+      inputSchema: {
+        workspaceId: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        path: z.string().describe('Relative path from the workspace root.'),
+        edits: z
+          .array(
+            z.object({
+              find: z
+                .string()
+                .optional()
+                .describe(
+                  'Exact text to replace, including indentation. Must occur exactly once unless replaceAll is set.'
+                ),
+              replace: z.string().optional().describe('Text to put in its place. Empty string deletes it.'),
+              replaceAll: z
+                .boolean()
+                .optional()
+                .describe('Replace every occurrence rather than requiring exactly one.'),
+              startLine: z
+                .number()
+                .int()
+                .optional()
+                .describe('Alternative to find: 1-indexed first line to replace.'),
+              endLine: z.number().int().optional().describe('1-indexed last line, inclusive. Defaults to startLine.'),
+              replacement: z.string().optional().describe('Replacement text when using startLine/endLine.')
+            })
+          )
+          .min(1)
+          .max(50)
+          .describe('Edits applied in order.'),
+        summary: z.string().optional().describe('One line describing the change, shown to the user.')
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    },
+    toolHandler('edit_file', async (args, extra) => {
+      assertScope(extra.authInfo, WRITE_SCOPE);
+      const { workspace, agent, session, clientName } = await resolveTarget(ctx, extra, args.workspaceId, {
+        toolName: 'edit_file',
+        requireLiveAgent: true,
+        summary: args.summary || args.path
+      });
+
+      const relPath = normalizeRelPath(args.path, 'path');
+
+      if (!workspace.getFile(relPath)) {
+        return fail(
+          `"${relPath}" is not in this workspace.\n\n` +
+            'Check the path with list_files. To create a new file, use write_files with action "create".'
+        );
+      }
+
+      const baseline = await checkpointBeforeChanges(ctx, { workspace, agent, clientName });
+
+      const result = await agent.request(
+        AGENT_METHOD.EDIT_FILE,
+        {
+          workspaceId: workspace.id,
+          path: relPath,
+          edits: args.edits,
+          meta: { actor: 'mcp', actorName: clientName, summary: args.summary || null, at: Date.now() }
+        },
+        { timeoutMs: config.bridgeWriteTimeoutMs }
+      );
+
+      if (!result.ok) {
+        return fail(`${result.message || result.error}`, { error: result.error, path: relPath });
+      }
+
+      workspace.applyChange({
+        type: 'updated',
+        path: relPath,
+        entry: {
+          path: relPath,
+          size: result.size,
+          revision: result.revision,
+          mtime: result.mtime ?? Date.now(),
+          binary: false,
+          dirty: false
+        },
+        revision: result.revision,
+        actor: 'mcp',
+        actorName: clientName,
+        summary: args.summary || null
+      });
+
+      // The cached copy is stale now, and we do not have the new full text
+      // here — dropping it forces the next read to fetch the truth.
+      ctx.contentCache.dropFile(workspace.id, relPath);
+      session.noteWrite(workspace.id, relPath, result.revision);
+      workspace.verification.markDirty([relPath]);
+
+      const verification = workspace.verification.toJSON();
+      ctx.hub.notifyUser(workspace.userId, SERVER_EVENT.CHANGES_APPLIED, {
+        workspaceId: workspace.id,
+        clientName,
+        summary: args.summary || `Edited ${relPath}`,
+        paths: [relPath],
+        verification
+      });
+
+      log.info(`${clientName} edited ${relPath} (${result.applied.length} edit(s))`);
+
+      const parts = [
+        `Edited ${relPath} -> revision ${result.revision}`,
+        `  ${result.applied.length} edit(s) applied, ${result.linesBefore} lines -> ${result.linesAfter} lines`
+      ];
+
+      const baselineNote = describeCheckpoint(baseline, { baseline: true });
+      if (baselineNote) parts.push('', baselineNote);
+
+      parts.push('', '='.repeat(72), REMINDERS.afterWrite(verification));
+
+      return ok(parts.join('\n'), { path: relPath, revision: result.revision, applied: result.applied, verification });
+    })
+  );
+
+  server.registerTool(
     'delete_files',
     {
       title: 'Delete files',

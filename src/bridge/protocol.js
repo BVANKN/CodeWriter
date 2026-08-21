@@ -29,6 +29,7 @@ export const FRAME = {
 export const AGENT_METHOD = {
   READ_FILES: 'readFiles',
   WRITE_FILES: 'writeFiles',
+  EDIT_FILE: 'editFile',
   DELETE_FILES: 'deleteFiles',
   MOVE_FILE: 'moveFile',
   SEARCH: 'search',
