@@ -117,11 +117,29 @@ export function registerReadTools(server, ctx) {
           })
         );
 
+        // The content MUST be here, not only in the text block.
+        //
+        // A tool result carries two representations, and the MCP spec lets a
+        // client use `structuredContent` in preference to the rendered text.
+        // Omitting the source from it meant such a client received
+        // `{ path, revision, lineCount, dirty }` — file metadata with no file —
+        // and correctly concluded it could not safely edit anything. The text
+        // block was fine, which is exactly why this was invisible from the
+        // server side.
+        //
+        // Rule for every tool here: structured output must stand on its own.
+        // If the interesting payload is only in the prose, it is a bug.
         structured.push({
           path: file.path,
+          content,
           revision: file.revision,
+          language,
           lineCount: countLines(file.content ?? ''),
           partial: partial || truncated,
+          truncated,
+          ...(truncated ? { omittedLines: budget.omittedLines } : {}),
+          ...(partial ? { startLine, endLine: startLine + countLines(content) - 1 } : {}),
+          encoding: file.encoding || 'utf8',
           dirty: Boolean(file.dirty)
         });
       }

@@ -281,7 +281,7 @@ export function registerCommandTools(server, ctx) {
             `Call get_command_result with runId "${runId}" to wait for the rest. Long installs and`,
             'cold builds routinely need two or three polls; that is normal, not a failure.'
           ].join('\n'),
-          { runId, status: 'running', partial: true }
+          { runId, status: 'running', partial: true, stdout: streamedOut, stderr: streamedErr, command: argv.join(' ') }
         );
       }
 
@@ -369,9 +369,14 @@ export function registerCommandTools(server, ctx) {
         `RESULT:  ${passed ? 'PASSED' : 'FAILED'}`
       ].join('\n');
 
+      // Kept as plain values too: a client that reads structuredContent rather
+      // than the rendered text must still get the output, not just an exit code.
+      const stdout = response.stdout || streamedOut || '';
+      const stderr = response.stderr || streamedErr || '';
+
       const body = [
-        renderCommandOutput('STDOUT', response.stdout || streamedOut, MAX_OUTPUT_CHARS),
-        renderCommandOutput('STDERR', response.stderr || streamedErr, MAX_OUTPUT_CHARS)
+        renderCommandOutput('STDOUT', stdout, MAX_OUTPUT_CHARS),
+        renderCommandOutput('STDERR', stderr, MAX_OUTPUT_CHARS)
       ].join('\n\n');
 
       const verification = workspace.verification.toJSON();
@@ -380,8 +385,8 @@ export function registerCommandTools(server, ctx) {
       const result = `${header}\n\n${body}${trailer}`;
 
       return passed
-        ? ok(result, { runId, exitCode, durationMs, passed, verification })
-        : fail(result, { runId, exitCode, durationMs, passed, verification });
+        ? ok(result, { runId, exitCode, durationMs, passed, stdout, stderr, command: argv.join(' '), verification })
+        : fail(result, { runId, exitCode, durationMs, passed, stdout, stderr, command: argv.join(' '), verification });
     })
   );
 
@@ -571,7 +576,7 @@ export function registerCommandTools(server, ctx) {
             '',
             'Still executing. Call get_command_result again with the same runId.'
           ].join('\n'),
-          { runId: record.runId, status: 'running', partial: true }
+          { runId: record.runId, status: 'running', partial: true, stdout: soFar, stderr: errSoFar, command: record.argv.join(' ') }
         );
       }
 
@@ -619,8 +624,8 @@ export function registerCommandTools(server, ctx) {
       const text = `${header}\n\n${body}${trailer}`;
 
       return passed
-        ? ok(text, { runId: record.runId, exitCode: response.exitCode, passed, verification })
-        : fail(text, { runId: record.runId, exitCode: response.exitCode, passed, verification });
+        ? ok(text, { runId: record.runId, exitCode: response.exitCode, passed, stdout: response.stdout || soFar, stderr: response.stderr || errSoFar, command: record.argv.join(' '), verification })
+        : fail(text, { runId: record.runId, exitCode: response.exitCode, passed, stdout: response.stdout || soFar, stderr: response.stderr || errSoFar, command: record.argv.join(' '), verification });
     })
   );
 
